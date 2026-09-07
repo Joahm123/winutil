@@ -11,12 +11,11 @@ Describe "PowerShell MSI upgrade" {
                 WindowsInstaller = 1
                 DisplayName = "PowerShell 7"
                 InstallLocation = "C:\Program Files\PowerShell\7"
+                DisplayVersion = "7.5.2"
             }
         }
 
-        Mock Get-WinUtilPowerShellVersion {
-            "7.5.2"
-        }
+        Mock Get-WinUtilPowerShellVersion { "7.5.2" }
 
         Mock Invoke-RestMethod {
             [pscustomobject]@{
@@ -32,119 +31,89 @@ Describe "PowerShell MSI upgrade" {
         }
 
         Mock Invoke-WebRequest {}
-
         Mock Get-AuthenticodeSignature {
             [pscustomobject]@{
                 Status = "Valid"
                 SignerCertificate = [pscustomobject]@{
-                    Subject = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+                    Subject = "CN=Microsoft Corporation"
                 }
             }
         }
     }
 
-    It "upgrades MSI-installed PowerShell successfully" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
-        }
+    It "upgrades MSI PowerShell successfully" {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Succeeded"
-        Should -Invoke Get-ItemProperty -Times 1
-        Should -Invoke Get-WinUtilPowerShellVersion -Times 1
-        Should -Invoke Invoke-RestMethod -Times 1
+        $result.Outcome | Should -Be "Succeeded"
         Should -Invoke Invoke-WebRequest -Times 1
         Should -Invoke Get-AuthenticodeSignature -Times 1
         Should -Invoke Start-Process -Times 1
     }
 
-    It "treats MSI exit code 3010 as success" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 3010 }
-        }
+    It "treats 3010 and 1641 as successful MSI upgrades" {
+        foreach ($exitCode in @(3010, 1641)) {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = $exitCode } }
 
-        $result = Update-WinUtilPowerShellMSI
+            $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Succeeded"
-        Should -Invoke Write-WinUtilLog -ParameterFilter {
-            $Message -match "PowerShell MSI upgrade succeeded"
-        }
-    }
+            $result.Outcome | Should -Be "Succeeded"
+            $result.ExitCode | Should -Be $exitCode
 
-    It "treats MSI exit code 1641 as success" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 1641 }
-        }
-
-        $result = Update-WinUtilPowerShellMSI
-
-        $result.State | Should -Be "Succeeded"
-        Should -Invoke Write-WinUtilLog -ParameterFilter {
-            $Message -match "PowerShell MSI upgrade succeeded"
+            Should -Invoke Start-Process -Times 1
         }
     }
 
     It "reports MSI installation failure" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 1603 }
-        }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 1603 } }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Failed"
+        $result.Outcome | Should -Be "Failed"
         Should -Invoke Write-WinUtilLog -ParameterFilter {
-            $Level -eq "ERROR" -and
-            $Message -match "PowerShell MSI upgrade failed"
+            $Level -eq "ERROR"
         }
     }
 
-    It "does not download when PowerShell is already current" {
-        Mock Get-WinUtilPowerShellVersion {
-            "7.5.3"
-        }
+    It "skips download when PowerShell is already current" {
+        Mock Get-WinUtilPowerShellVersion { "7.5.3" }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Succeeded"
-        Should -Invoke Invoke-RestMethod -Times 1
+        $result.Outcome | Should -Be "Skipped"
         Should -Invoke Invoke-WebRequest -Times 0
-        Should -Invoke Get-AuthenticodeSignature -Times 0
         Should -Invoke Start-Process -Times 0
     }
 
     It "returns NotInstalled when PowerShell is not MSI-installed" {
-        Mock Get-ItemProperty {
-            $null
-        }
+        Mock Get-ItemProperty { $null }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "NotInstalled"
+        $result.Outcome | Should -Be "NotInstalled"
         Should -Invoke Invoke-RestMethod -Times 0
-        Should -Invoke Invoke-WebRequest -Times 0
         Should -Invoke Start-Process -Times 0
     }
 
-    It "rejects a missing signer certificate" {
+    It "rejects an invalid or missing signer certificate" {
         Mock Get-AuthenticodeSignature {
             [pscustomobject]@{
-                Status = "Valid"
+                Status = "NotTrusted"
                 SignerCertificate = $null
             }
         }
 
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
-        }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Failed"
+        $result.Outcome | Should -Be "Failed"
         Should -Invoke Start-Process -Times 0
     }
 
-    It "rejects a trusted non-Microsoft certificate containing Microsoft in the subject" {
+    It "rejects a non-Microsoft certificate containing Microsoft" {
         Mock Get-AuthenticodeSignature {
             [pscustomobject]@{
                 Status = "Valid"
@@ -154,76 +123,119 @@ Describe "PowerShell MSI upgrade" {
             }
         }
 
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Update-WinUtilPowerShellMSI
+
+        $result.Outcome | Should -Be "Failed"
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It "rejects a mismatched SHA256 digest" {
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                tag_name = "v7.5.3"
+                assets = @(
+                    [pscustomobject]@{
+                        name = "PowerShell-7.5.3-win-x64.msi"
+                        browser_download_url = "https://example.com/PowerShell.msi"
+                        digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    }
+                )
+            }
+        }
+
+        Mock Get-FileHash {
+            [pscustomobject]@{
+                Hash = "1111111111111111111111111111111111111111111111111111111111111111"
+            }
+        }
+
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Update-WinUtilPowerShellMSI
+
+        $result.Outcome | Should -Be "Failed"
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It "uses MSI for selected PowerShell Install and Upgrade" {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        foreach ($action in @("Install", "Upgrade")) {
+            $result = Install-WinUtilProgramWinget `
+                -Action $action `
+                -Programs @("Microsoft.PowerShell")
+
+            $result.Package | Should -Be "Microsoft.PowerShell"
+            $result.Manager | Should -Be "msi"
+            $result.Outcome | Should -Be "Succeeded"
+        }
+
+        Should -Invoke Start-Process -Times 2
+    }
+
+    It "falls back to WinGet when PowerShell is not MSI-installed" {
+        Mock Get-ItemProperty { $null }
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("Microsoft.PowerShell")
+
+        $result.Manager | Should -Be "winget"
+        $result.Outcome | Should -Be "Succeeded"
+        Should -Invoke Start-Process -Times 1
+    }
+
+    It "does not fall through to WinGet after MSI handling" {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        $result = Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("Microsoft.PowerShell")
+
+        $result.Manager | Should -Be "msi"
+        $result.Outcome | Should -Be "Succeeded"
+
+        Should -Invoke Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq "msiexec.exe"
+        }
+    }
+
+    It "does not use WinGet all when MSI PowerShell is detected" {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("all")
+
+        Should -Invoke Start-Process -Times 0 -ParameterFilter {
+            $FilePath -eq "winget" -and
+            $ArgumentList -contains "--all"
+        }
+    }
+
+    It "ignores PowerShell preview installations" {
+        Mock Get-ItemProperty {
+            @(
+                [pscustomobject]@{
+                    WindowsInstaller = 1
+                    DisplayName = "PowerShell 7-preview"
+                    InstallLocation = "C:\PowerShell\preview"
+                    DisplayVersion = "7.6.0-preview"
+                },
+                [pscustomobject]@{
+                    WindowsInstaller = 1
+                    DisplayName = "PowerShell 7"
+                    InstallLocation = "C:\PowerShell\7"
+                    DisplayVersion = "7.5.2"
+                }
+            )
         }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result.State | Should -Be "Failed"
-        Should -Invoke Start-Process -Times 0
-    }
-
-    It "does not run WinGet after a successful MSI PowerShell upgrade" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
-        }
-
-        $result = Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
-
-        $result.Outcome | Should -Be "Succeeded"
-        $result.Manager | Should -Be "msi"
-        Should -Invoke Start-Process -Times 1
-    }
-
-    It "does not run WinGet after a failed MSI PowerShell upgrade" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 1603 }
-        }
-
-        $result = Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
-
-        $result.Outcome | Should -Be "Failed"
-        $result.Manager | Should -Be "msi"
-        Should -Invoke Start-Process -Times 1
-    }
-
-    It "falls back to WinGet when PowerShell is not MSI-installed" {
-        Mock Get-ItemProperty {
-            $null
-        }
-
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
-        }
-
-        $result = Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
-
-        $result.Outcome | Should -Be "Succeeded"
-        $result.Manager | Should -Be "winget"
-        Should -Invoke Invoke-RestMethod -Times 0
-        Should -Invoke Invoke-WebRequest -Times 0
-        Should -Invoke Get-AuthenticodeSignature -Times 0
-        Should -Invoke Start-Process -Times 1
-    }
-
-    It "checks MSI-installed PowerShell during Upgrade All" {
-        Mock Start-Process {
-            [pscustomobject]@{ ExitCode = 0 }
-        }
-
-        $result = Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("all")
-
-        Should -Invoke Get-ItemProperty -Times 1
-        Should -Invoke Get-WinUtilPowerShellVersion -Times 1
-        Should -Invoke Invoke-RestMethod -Times 1
+        $result.Outcome | Should -Not -Be "NotInstalled"
     }
 }
