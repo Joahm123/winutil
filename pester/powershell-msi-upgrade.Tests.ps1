@@ -37,7 +37,7 @@ Describe "PowerShell MSI upgrade" {
             [pscustomobject]@{
                 Status = "Valid"
                 SignerCertificate = [pscustomobject]@{
-                    Subject = "CN=Microsoft Corporation"
+                    Subject = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
                 }
             }
         }
@@ -50,7 +50,7 @@ Describe "PowerShell MSI upgrade" {
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeTrue
+        $result.State | Should -Be "Succeeded"
         Should -Invoke Get-ItemProperty -Times 1
         Should -Invoke Get-WinUtilPowerShellVersion -Times 1
         Should -Invoke Invoke-RestMethod -Times 1
@@ -66,7 +66,7 @@ Describe "PowerShell MSI upgrade" {
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeTrue
+        $result.State | Should -Be "Succeeded"
         Should -Invoke Write-WinUtilLog -ParameterFilter {
             $Message -match "PowerShell MSI upgrade succeeded"
         }
@@ -79,7 +79,7 @@ Describe "PowerShell MSI upgrade" {
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeTrue
+        $result.State | Should -Be "Succeeded"
         Should -Invoke Write-WinUtilLog -ParameterFilter {
             $Message -match "PowerShell MSI upgrade succeeded"
         }
@@ -92,7 +92,7 @@ Describe "PowerShell MSI upgrade" {
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeFalse
+        $result.State | Should -Be "Failed"
         Should -Invoke Write-WinUtilLog -ParameterFilter {
             $Level -eq "ERROR" -and
             $Message -match "PowerShell MSI upgrade failed"
@@ -106,36 +106,90 @@ Describe "PowerShell MSI upgrade" {
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeTrue
+        $result.State | Should -Be "Succeeded"
         Should -Invoke Invoke-RestMethod -Times 1
         Should -Invoke Invoke-WebRequest -Times 0
         Should -Invoke Get-AuthenticodeSignature -Times 0
         Should -Invoke Start-Process -Times 0
     }
 
-    It "returns false when PowerShell is not MSI-installed" {
+    It "returns NotInstalled when PowerShell is not MSI-installed" {
         Mock Get-ItemProperty {
             $null
         }
 
         $result = Update-WinUtilPowerShellMSI
 
-        $result | Should -BeFalse
+        $result.State | Should -Be "NotInstalled"
         Should -Invoke Invoke-RestMethod -Times 0
         Should -Invoke Invoke-WebRequest -Times 0
         Should -Invoke Start-Process -Times 0
     }
 
-    It "checks MSI-installed PowerShell during Upgrade All" {
+    It "rejects a missing signer certificate" {
+        Mock Get-AuthenticodeSignature {
+            [pscustomobject]@{
+                Status = "Valid"
+                SignerCertificate = $null
+            }
+        }
+
         Mock Start-Process {
             [pscustomobject]@{ ExitCode = 0 }
         }
 
-        Install-WinUtilProgramWinget -Action Upgrade -Programs @("all")
+        $result = Update-WinUtilPowerShellMSI
 
-        Should -Invoke Get-ItemProperty -Times 1
-        Should -Invoke Get-WinUtilPowerShellVersion -Times 1
-        Should -Invoke Invoke-RestMethod -Times 1
+        $result.State | Should -Be "Failed"
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It "rejects a trusted non-Microsoft certificate containing Microsoft in the subject" {
+        Mock Get-AuthenticodeSignature {
+            [pscustomobject]@{
+                Status = "Valid"
+                SignerCertificate = [pscustomobject]@{
+                    Subject = "CN=Microsoft Malware Research"
+                }
+            }
+        }
+
+        Mock Start-Process {
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Update-WinUtilPowerShellMSI
+
+        $result.State | Should -Be "Failed"
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It "does not run WinGet after a successful MSI PowerShell upgrade" {
+        Mock Start-Process {
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("Microsoft.PowerShell")
+
+        $result.Outcome | Should -Be "Succeeded"
+        $result.Manager | Should -Be "msi"
+        Should -Invoke Start-Process -Times 1
+    }
+
+    It "does not run WinGet after a failed MSI PowerShell upgrade" {
+        Mock Start-Process {
+            [pscustomobject]@{ ExitCode = 1603 }
+        }
+
+        $result = Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("Microsoft.PowerShell")
+
+        $result.Outcome | Should -Be "Failed"
+        $result.Manager | Should -Be "msi"
+        Should -Invoke Start-Process -Times 1
     }
 
     It "falls back to WinGet when PowerShell is not MSI-installed" {
@@ -151,9 +205,25 @@ Describe "PowerShell MSI upgrade" {
             -Action Upgrade `
             -Programs @("Microsoft.PowerShell")
 
+        $result.Outcome | Should -Be "Succeeded"
+        $result.Manager | Should -Be "winget"
         Should -Invoke Invoke-RestMethod -Times 0
         Should -Invoke Invoke-WebRequest -Times 0
         Should -Invoke Get-AuthenticodeSignature -Times 0
         Should -Invoke Start-Process -Times 1
+    }
+
+    It "checks MSI-installed PowerShell during Upgrade All" {
+        Mock Start-Process {
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WinUtilProgramWinget `
+            -Action Upgrade `
+            -Programs @("all")
+
+        Should -Invoke Get-ItemProperty -Times 1
+        Should -Invoke Get-WinUtilPowerShellVersion -Times 1
+        Should -Invoke Invoke-RestMethod -Times 1
     }
 }
