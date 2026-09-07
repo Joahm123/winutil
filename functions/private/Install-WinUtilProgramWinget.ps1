@@ -35,7 +35,7 @@ Function Update-WinUtilPowerShellMSI {
 
             if ($asset.digest) {
                 $hash = (Get-FileHash $msiPath -Algorithm SHA256).Hash.ToLower()
-                if ($hash -ne $asset.digest.Replace("sha256:","").ToLower()) {
+                if ($hash -ne $asset.digest.Replace("sha256:", "").ToLower()) {
                     throw "PowerShell MSI SHA256 verification failed"
                 }
             }
@@ -46,7 +46,7 @@ Function Update-WinUtilPowerShellMSI {
             }
 
             $install = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -PassThru
-            if ($install.ExitCode -notin @(0,3010,1641)) {
+            if ($install.ExitCode -notin @(0, 3010, 1641)) {
                 throw "PowerShell MSI installation failed with exit code $($install.ExitCode)"
             }
 
@@ -133,10 +133,10 @@ Function Install-WinUtilProgramWinget {
 
         $arguments = switch ($Action) {
             "Uninstall" { @("uninstall", "--id", $program, "--source", $source, "--silent") }
+            # --include-unknown because the scan that found these ran with it: without it winget
+            # refuses every package whose installed version it could not read
             "Upgrade" {
                 if ($upgradeAll) {
-                    # --include-unknown because the scan that found these ran with it: without it winget
-                    # refuses every package whose installed version it could not read
                     @("upgrade", "--all", "--accept-package-agreements", "--accept-source-agreements", "--include-unknown", "--silent")
                 } else {
                     @("upgrade", "--id", $program, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--include-unknown", "--silent")
