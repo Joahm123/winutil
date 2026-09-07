@@ -3,11 +3,7 @@ Describe "PowerShell MSI upgrade" {
         . "$PSScriptRoot/../functions/private/Install-WinUtilProgramWinget.ps1"
 
         Mock Write-WinUtilLog {}
-
-        Mock Test-Path {
-            $true
-        }
-
+        Mock Test-Path { $true }
         Mock Remove-Item {}
 
         Mock Get-ItemProperty {
@@ -49,89 +45,54 @@ Describe "PowerShell MSI upgrade" {
 
     It "upgrades MSI-installed PowerShell successfully" {
         Mock Start-Process {
-            [pscustomobject]@{
-                ExitCode = 0
-            }
+            [pscustomobject]@{ ExitCode = 0 }
         }
 
-        $result = Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
+        $result = Update-WinUtilPowerShellMSI
 
+        $result | Should -BeTrue
         Should -Invoke Get-ItemProperty -Times 1
         Should -Invoke Get-WinUtilPowerShellVersion -Times 1
         Should -Invoke Invoke-RestMethod -Times 1
         Should -Invoke Invoke-WebRequest -Times 1
         Should -Invoke Get-AuthenticodeSignature -Times 1
-        Should -Invoke Start-Process -Times 2
+        Should -Invoke Start-Process -Times 1
     }
 
-    It "treats MSI upgrade exit code 3010 as success" {
+    It "treats MSI exit code 3010 as success" {
         Mock Start-Process {
-            param($FilePath)
-
-            if ($FilePath -eq "msiexec.exe") {
-                [pscustomobject]@{
-                    ExitCode = 3010
-                }
-            }
-            else {
-                [pscustomobject]@{
-                    ExitCode = 0
-                }
-            }
+            [pscustomobject]@{ ExitCode = 3010 }
         }
 
-        Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
+        $result = Update-WinUtilPowerShellMSI
 
-        Should -Invoke Start-Process -Times 2
+        $result | Should -BeTrue
+        Should -Invoke Write-WinUtilLog -ParameterFilter {
+            $Message -match "PowerShell MSI upgrade succeeded"
+        }
     }
 
-    It "treats MSI upgrade exit code 1641 as success" {
+    It "treats MSI exit code 1641 as success" {
         Mock Start-Process {
-            param($FilePath)
-
-            if ($FilePath -eq "msiexec.exe") {
-                [pscustomobject]@{
-                    ExitCode = 1641
-                }
-            }
-            else {
-                [pscustomobject]@{
-                    ExitCode = 0
-                }
-            }
+            [pscustomobject]@{ ExitCode = 1641 }
         }
 
-        Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
+        $result = Update-WinUtilPowerShellMSI
 
-        Should -Invoke Start-Process -Times 2
+        $result | Should -BeTrue
+        Should -Invoke Write-WinUtilLog -ParameterFilter {
+            $Message -match "PowerShell MSI upgrade succeeded"
+        }
     }
 
-    It "logs an error when MSI installation fails" {
+    It "reports MSI installation failure" {
         Mock Start-Process {
-            param($FilePath)
-
-            if ($FilePath -eq "msiexec.exe") {
-                [pscustomobject]@{
-                    ExitCode = 1603
-                }
-            }
-            else {
-                [pscustomobject]@{
-                    ExitCode = 0
-                }
-            }
+            [pscustomobject]@{ ExitCode = 1603 }
         }
 
-        Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
+        $result = Update-WinUtilPowerShellMSI
 
+        $result | Should -BeFalse
         Should -Invoke Write-WinUtilLog -ParameterFilter {
             $Level -eq "ERROR" -and
             $Message -match "PowerShell MSI upgrade failed"
@@ -143,19 +104,34 @@ Describe "PowerShell MSI upgrade" {
             "7.5.3"
         }
 
-        Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("Microsoft.PowerShell")
+        $result = Update-WinUtilPowerShellMSI
 
+        $result | Should -BeTrue
         Should -Invoke Invoke-RestMethod -Times 1
         Should -Invoke Invoke-WebRequest -Times 0
         Should -Invoke Get-AuthenticodeSignature -Times 0
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It "returns false when PowerShell is not MSI-installed" {
+        Mock Get-ItemProperty {
+            $null
+        }
+
+        $result = Update-WinUtilPowerShellMSI
+
+        $result | Should -BeFalse
+        Should -Invoke Invoke-RestMethod -Times 0
+        Should -Invoke Invoke-WebRequest -Times 0
+        Should -Invoke Start-Process -Times 0
     }
 
     It "checks MSI-installed PowerShell during Upgrade All" {
-        Install-WinUtilProgramWinget `
-            -Action Upgrade `
-            -Programs @("all")
+        Mock Start-Process {
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        Install-WinUtilProgramWinget -Action Upgrade -Programs @("all")
 
         Should -Invoke Get-ItemProperty -Times 1
         Should -Invoke Get-WinUtilPowerShellVersion -Times 1
@@ -168,9 +144,7 @@ Describe "PowerShell MSI upgrade" {
         }
 
         Mock Start-Process {
-            [pscustomobject]@{
-                ExitCode = 0
-            }
+            [pscustomobject]@{ ExitCode = 0 }
         }
 
         $result = Install-WinUtilProgramWinget `
@@ -179,6 +153,7 @@ Describe "PowerShell MSI upgrade" {
 
         Should -Invoke Invoke-RestMethod -Times 0
         Should -Invoke Invoke-WebRequest -Times 0
+        Should -Invoke Get-AuthenticodeSignature -Times 0
         Should -Invoke Start-Process -Times 1
     }
 }
