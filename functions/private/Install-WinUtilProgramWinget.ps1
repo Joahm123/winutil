@@ -9,7 +9,10 @@ Function Update-WinUtilPowerShellMSI {
         Select-Object -First 1
 
     if (-not $msi) {
-        return $false
+        return [pscustomobject]@{
+            State = "NotInstalled"
+            Detail = "PowerShell is not installed through MSI"
+        }
     }
 
     try {
@@ -20,7 +23,10 @@ Function Update-WinUtilPowerShellMSI {
 
         if ($installed -and $latest -and [version]$installed -ge [version]$latest) {
             Write-WinUtilLog -Component "Package" -Message "PowerShell is already current ($installed)"
-            return $true
+            return [pscustomobject]@{
+                State = "Succeeded"
+                Detail = "PowerShell $installed is already current"
+            }
         }
 
         $asset = $release.assets | Where-Object { $_.name -match "^PowerShell-.*-win-$arch\.msi$" } | Select-Object -First 1
@@ -41,7 +47,11 @@ Function Update-WinUtilPowerShellMSI {
             }
 
             $signature = Get-AuthenticodeSignature $msiPath
-            if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft") {
+            if (
+                $signature.Status -ne "Valid" -or
+                -not $signature.SignerCertificate -or
+                $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)'
+            ) {
                 throw "PowerShell MSI signature verification failed"
             }
 
@@ -51,7 +61,10 @@ Function Update-WinUtilPowerShellMSI {
             }
 
             Write-WinUtilLog -Component "Package" -Message "PowerShell MSI upgrade succeeded (exit code $($install.ExitCode))"
-            return $true
+            return [pscustomobject]@{
+                State = "Succeeded"
+                Detail = "PowerShell MSI upgrade succeeded (exit code $($install.ExitCode))"
+            }
         }
         finally {
             Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
@@ -59,7 +72,10 @@ Function Update-WinUtilPowerShellMSI {
     }
     catch {
         Write-WinUtilLog -Level "ERROR" -Component "Package" -Message "PowerShell MSI upgrade failed: $($_.Exception.Message)"
-        return $false
+        return [pscustomobject]@{
+            State = "Failed"
+            Detail = $_.Exception.Message
+        }
     }
 }
 
@@ -114,9 +130,30 @@ Function Install-WinUtilProgramWinget {
         }
 
         $upgradeAll = $Action -eq "Upgrade" -and $program -eq "all"
+        $powerShellMsiResult = $null
 
         if ($Action -eq "Upgrade" -and ($program -eq "Microsoft.PowerShell" -or $upgradeAll)) {
-            Update-WinUtilPowerShellMSI
+            $powerShellMsiResult = Update-WinUtilPowerShellMSI
+
+            if ($program -eq "Microsoft.PowerShell" -and $powerShellMsiResult.State -ne "NotInstalled") {
+                $outcome = if ($powerShellMsiResult.State -eq "Succeeded") { "Succeeded" } else { "Failed" }
+                $exitCode = if ($powerShellMsiResult.State -eq "Succeeded") { 0 } else { -1 }
+                $detail = $powerShellMsiResult.Detail
+                $level = if ($outcome -eq "Failed") { "ERROR" } else { "INFO" }
+
+                Write-WinUtilLog -Level $level -Component "Package" -Message "$Action PowerShell MSI package $($outcome.ToLowerInvariant()): $detail"
+
+                [pscustomobject]@{
+                    Package = $program
+                    Manager = "msi"
+                    Action = $Action
+                    ExitCode = $exitCode
+                    Outcome = $outcome
+                    Detail = $detail
+                }
+
+                continue
+            }
         }
 
         $source = if ($upgradeAll) { "all configured sources" } else { "winget" }
