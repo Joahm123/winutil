@@ -13,9 +13,7 @@ Function Install-WinUtilProgramWinget {
         its output is redirected, so there is nothing to report from inside a single install.
 
         PowerShell 7 has a special upgrade path because WinGet cannot upgrade a PowerShell
-        installation that was originally installed using the MSI installer. In that case,
-        the latest official PowerShell x64 MSI is downloaded from the PowerShell GitHub
-        release and installed directly with Windows Installer.
+        installation that was originally installed using the MSI installer.
 
     #>
     param (
@@ -37,11 +35,13 @@ Function Install-WinUtilProgramWinget {
         -1978335135 = "already installed"
         -1978335189 = "no applicable update"
     }
-
-    # The installer worked and wants a restart to finish.
+    # The installer worked and wants a restart to finish. Windows reports that as its own exit
+    # code rather than as zero, and treating it as a failure marks working installs as broken.
     $rebootExitCodes = @{
         3010 = "installed, a restart is needed to finish"
         1641 = "installed, the installer started a restart"
+        # WinGet's own equivalents. -1978334966 is deliberately absent: it means a reboot is
+        # required before the install can proceed, which is not a completed install.
         -1978334967 = "installed, a restart is needed to finish"
         -1978334965 = "installed, the installer started a restart"
     }
@@ -53,7 +53,6 @@ Function Install-WinUtilProgramWinget {
 
         $upgradeAll = $Action -eq "Upgrade" -and $program -eq "all"
         $source = if ($upgradeAll) { "all configured sources" } else { "winget" }
-
         if (-not $upgradeAll -and $program.StartsWith("msstore:", [System.StringComparison]::OrdinalIgnoreCase)) {
             $source = "msstore"
             $program = $program.Substring("msstore:".Length)
@@ -65,227 +64,82 @@ Function Install-WinUtilProgramWinget {
         $detail = "no result"
         $exitCode = -1
 
-        # ============================================================
-        # PowerShell 7 MSI upgrade workaround
-        # ============================================================
-        #
-        # WinGet cannot upgrade PowerShell when the existing installation
-        # was installed using the MSI installer.
-        #
-        # Detect the Windows Installer registration rather than relying
-        # only on the PowerShell installation path.
-        #
-        $powerShellMsiUpgrade = $Action -eq "Upgrade" -and
-            $program -eq "Microsoft.PowerShell" -and
-            -not $upgradeAll
-
-        if ($powerShellMsiUpgrade) {
-            $powerShellExe = Join-Path ${env:ProgramFiles} "PowerShell\7\pwsh.exe"
-            $powerShellInstallPath = Join-Path ${env:ProgramFiles} "PowerShell\7"
-
+        # PowerShell installed through MSI cannot be upgraded by WinGet because the
+        # installation technology does not match. Use the official PowerShell MSI instead.
+        if ($Action -eq "Upgrade" -and $program -eq "Microsoft.PowerShell" -and -not $upgradeAll) {
+            $powerShellPath = Join-Path ${env:ProgramFiles} "PowerShell\7"
+            $powerShellExe = Join-Path $powerShellPath "pwsh.exe"
             $powerShellMsiInstalled = $false
 
-            if ((Test-Path -LiteralPath $powerShellExe) -and
-                (Test-Path -LiteralPath $powerShellInstallPath)) {
+            if (Test-Path -LiteralPath $powerShellExe) {
+                $uninstallPaths = @(
+                    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+                    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+                )
 
-                try {
-                    # Check both normal and 32-bit uninstall registry locations.
-                    # A machine-wide MSI installation registers itself with
-                    # WindowsInstaller=1.
-                    $uninstallPaths = @(
-                        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
-                        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-                    )
+                foreach ($uninstallPath in $uninstallPaths) {
+                    $entries = Get-ItemProperty -Path $uninstallPath -ErrorAction SilentlyContinue
 
-                    foreach ($uninstallPath in $uninstallPaths) {
-                        $entries = Get-ItemProperty -Path $uninstallPath -ErrorAction SilentlyContinue
-
-                        foreach ($entry in $entries) {
-                            if ($entry.WindowsInstaller -ne 1) {
-                                continue
-                            }
-
-                            $displayName = [string]$entry.DisplayName
-                            $installLocation = [string]$entry.InstallLocation
-
-                            $isPowerShell = $displayName -match '^PowerShell\s+7'
-                            $isPowerShellInstallPath = $false
-
-                            if (-not [string]::IsNullOrWhiteSpace($installLocation)) {
-                                try {
-                                    $normalizedInstallLocation = [System.IO.Path]::GetFullPath(
-                                        $installLocation.TrimEnd('\') + '\'
-                                    )
-
-                                    $normalizedPowerShellPath = [System.IO.Path]::GetFullPath(
-                                        $powerShellInstallPath.TrimEnd('\') + '\'
-                                    )
-
-                                    $isPowerShellInstallPath =
-                                        $normalizedInstallLocation.Equals(
-                                            $normalizedPowerShellPath,
-                                            [System.StringComparison]::OrdinalIgnoreCase
-                                        )
-                                }
-                                catch {
-                                    $isPowerShellInstallPath = $false
-                                }
-                            }
-
-                            if ($isPowerShell -and $isPowerShellInstallPath) {
-                                $powerShellMsiInstalled = $true
-                                break
-                            }
-                        }
-
-                        if ($powerShellMsiInstalled) {
+                    foreach ($entry in $entries) {
+                        if ($entry.WindowsInstaller -eq 1 -and
+                            [string]$entry.DisplayName -match '^PowerShell\s+7' -and
+                            [string]$entry.InstallLocation -like "$powerShellPath*") {
+                            $powerShellMsiInstalled = $true
                             break
                         }
                     }
-                }
-                catch {
-                    Write-WinUtilLog `
-                        -Level "WARN" `
-                        -Component "Package" `
-                        -Message "Could not inspect the Windows Installer registry for PowerShell: $($_.Exception.Message)"
+
+                    if ($powerShellMsiInstalled) {
+                        break
+                    }
                 }
             }
 
             if ($powerShellMsiInstalled) {
-                Write-WinUtilLog `
-                    -Component "Package" `
-                    -Message "Detected MSI-installed PowerShell 7 through the Windows Installer registry. Using the PowerShell MSI upgrade path."
-
                 $tempMsi = $null
-                $tempDirectory = $null
 
                 try {
-                    $installedVersion = $null
+                    Write-WinUtilLog -Component "Package" -Message "Detected MSI-installed PowerShell 7. Downloading the latest official PowerShell MSI."
 
-                    try {
-                        $installedVersion = & $powerShellExe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
-
-                        if ($installedVersion) {
-                            $installedVersion = $installedVersion.Trim()
-                        }
-                    }
-                    catch {
-                        Write-WinUtilLog `
-                            -Level "WARN" `
-                            -Component "Package" `
-                            -Message "Could not determine the installed PowerShell version: $($_.Exception.Message)"
+                    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/PowerShell/PowerShell/releases/latest" -Headers @{
+                        "Accept" = "application/vnd.github+json"
+                        "User-Agent" = "WinUtil"
                     }
 
-                    # Official PowerShell GitHub releases API.
-                    $releaseApi = "https://api.github.com/repos/PowerShell/PowerShell/releases/latest"
-
-                    Write-WinUtilLog `
-                        -Component "Package" `
-                        -Message "Checking the latest PowerShell release from GitHub."
-
-                    $release = Invoke-RestMethod `
-                        -Uri $releaseApi `
-                        -Method Get `
-                        -Headers @{
-                            "Accept" = "application/vnd.github+json"
-                            "User-Agent" = "WinUtil"
-                        }
-
-                    if (-not $release -or -not $release.assets) {
-                        throw "The latest PowerShell GitHub release did not contain any downloadable assets."
-                    }
-
-                    # Find the official Windows x64 MSI.
-                    $msiAsset = $release.assets |
-                        Where-Object {
-                            $_.name -match '^PowerShell-.*-win-x64\.msi$'
-                        } |
-                        Select-Object -First 1
+                    $msiAsset = $release.assets | Where-Object {
+                        $_.name -match '^PowerShell-.*-win-x64\.msi$'
+                    } | Select-Object -First 1
 
                     if (-not $msiAsset) {
                         throw "Could not find the PowerShell win-x64 MSI in the latest GitHub release."
                     }
 
-                    if ([string]::IsNullOrWhiteSpace($msiAsset.browser_download_url)) {
-                        throw "The PowerShell MSI release asset did not contain a download URL."
+                    $tempMsi = Join-Path $env:TEMP $msiAsset.name
+
+                    Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile $tempMsi -UseBasicParsing -Headers @{
+                        "Accept" = "application/octet-stream"
+                        "User-Agent" = "WinUtil"
                     }
-
-                    Write-WinUtilLog `
-                        -Component "Package" `
-                        -Message "Latest PowerShell MSI found: $($msiAsset.name)"
-
-                    # Create a temporary directory specifically for this upgrade.
-                    $tempDirectory = Join-Path $env:TEMP "WinUtil-PowerShell"
-
-                    if (-not (Test-Path -LiteralPath $tempDirectory)) {
-                        New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
-                    }
-
-                    $tempMsi = Join-Path $tempDirectory $msiAsset.name
-
-                    if (Test-Path -LiteralPath $tempMsi) {
-                        Remove-Item -LiteralPath $tempMsi -Force -ErrorAction SilentlyContinue
-                    }
-
-                    Write-WinUtilLog `
-                        -Component "Package" `
-                        -Message "Downloading PowerShell MSI to $tempMsi"
-
-                    Invoke-WebRequest `
-                        -Uri $msiAsset.browser_download_url `
-                        -OutFile $tempMsi `
-                        -UseBasicParsing `
-                        -Headers @{
-                            "Accept" = "application/octet-stream"
-                            "User-Agent" = "WinUtil"
-                        }
 
                     if (-not (Test-Path -LiteralPath $tempMsi)) {
-                        throw "PowerShell MSI download did not produce an installer file."
+                        throw "PowerShell MSI download failed."
                     }
 
-                    $downloadedFile = Get-Item -LiteralPath $tempMsi -ErrorAction Stop
+                    Write-WinUtilLog -Component "Package" -Message "Installing PowerShell MSI: $($msiAsset.name)"
 
-                    if ($downloadedFile.Length -le 0) {
-                        throw "The downloaded PowerShell MSI is empty."
-                    }
-
-                    Write-WinUtilLog `
-                        -Component "Package" `
-                        -Message "Installing PowerShell MSI: $($msiAsset.name)"
-
-                    # Install silently without automatically restarting Windows.
-                    $msiProcess = Start-Process `
-                        -FilePath "msiexec.exe" `
-                        -ArgumentList @(
-                            "/i"
-                            "`"$tempMsi`""
-                            "/qn"
-                            "/norestart"
-                        ) `
-                        -NoNewWindow `
-                        -Wait `
-                        -PassThru
-
+                    $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$tempMsi`"", "/qn", "/norestart") -NoNewWindow -Wait -PassThru
                     $exitCode = $msiProcess.ExitCode
 
                     if ($exitCode -eq 0) {
                         $outcome = "Succeeded"
                         $detail = "PowerShell MSI installed successfully"
-
-                        if ($installedVersion) {
-                            $detail = "$detail; previous version $installedVersion"
-                        }
-                    }
-                    elseif ($exitCode -eq 3010) {
+                    } elseif ($exitCode -eq 3010) {
                         $outcome = "Succeeded"
                         $detail = "PowerShell MSI installed successfully; a restart is needed to finish"
-                    }
-                    elseif ($exitCode -eq 1641) {
+                    } elseif ($exitCode -eq 1641) {
                         $outcome = "Succeeded"
                         $detail = "PowerShell MSI installed successfully; the installer requested a restart"
-                    }
-                    else {
+                    } else {
                         $outcome = "Failed"
                         $detail = "PowerShell MSI installer returned exit code $exitCode"
                     }
@@ -296,41 +150,13 @@ Function Install-WinUtilProgramWinget {
                     $detail = "PowerShell MSI upgrade failed: $($_.Exception.Message)"
                 }
                 finally {
-                    # Always remove the downloaded MSI, even if installation fails.
                     if ($tempMsi -and (Test-Path -LiteralPath $tempMsi)) {
-                        try {
-                            Remove-Item -LiteralPath $tempMsi -Force -ErrorAction Stop
-
-                            Write-WinUtilLog `
-                                -Component "Package" `
-                                -Message "Removed temporary PowerShell MSI: $tempMsi"
-                        }
-                        catch {
-                            Write-WinUtilLog `
-                                -Level "WARN" `
-                                -Component "Package" `
-                                -Message "Could not remove temporary PowerShell MSI $tempMsi`: $($_.Exception.Message)"
-                        }
-                    }
-
-                    # Remove the temporary directory if it is empty.
-                    if ($tempDirectory -and (Test-Path -LiteralPath $tempDirectory)) {
-                        try {
-                            Remove-Item -LiteralPath $tempDirectory -Force -ErrorAction SilentlyContinue
-                        }
-                        catch {
-                            # The directory is only temporary cleanup, so don't
-                            # turn a successful upgrade into a failed operation.
-                        }
+                        Remove-Item -LiteralPath $tempMsi -Force -ErrorAction SilentlyContinue
                     }
                 }
 
                 $level = if ($outcome -eq "Failed") { "ERROR" } else { "INFO" }
-
-                Write-WinUtilLog `
-                    -Level $level `
-                    -Component "Package" `
-                    -Message "$Action winget package $($outcome.ToLowerInvariant()): $program ($detail)"
+                Write-WinUtilLog -Level $level -Component "Package" -Message "$Action winget package $($outcome.ToLowerInvariant()): $program ($detail)"
 
                 [pscustomobject]@{
                     Package = $program
@@ -341,126 +167,48 @@ Function Install-WinUtilProgramWinget {
                     Detail = $detail
                 }
 
-                # The PowerShell MSI path has completely handled this package.
                 continue
             }
-
-            Write-WinUtilLog `
-                -Component "Package" `
-                -Message "PowerShell 7 was not detected as an MSI installation. Falling back to WinGet."
         }
-
-        # ============================================================
-        # Normal WinGet path
-        # ============================================================
 
         $arguments = switch ($Action) {
-            "Uninstall" {
-                @(
-                    "uninstall"
-                    "--id"
-                    $program
-                    "--source"
-                    $source
-                    "--silent"
-                )
-            }
-
-            # --include-unknown because the scan that found these ran with it:
-            # without it winget refuses every package whose installed version
-            # it could not read.
+            "Uninstall" { @("uninstall", "--id", $program, "--source", $source, "--silent") }
             "Upgrade" {
                 if ($upgradeAll) {
-                    @(
-                        "upgrade"
-                        "--all"
-                        "--accept-package-agreements"
-                        "--accept-source-agreements"
-                        "--include-unknown"
-                        "--silent"
-                    )
-                }
-                else {
-                    @(
-                        "upgrade"
-                        "--id"
-                        $program
-                        "--accept-package-agreements"
-                        "--accept-source-agreements"
-                        "--source"
-                        $source
-                        "--include-unknown"
-                        "--silent"
-                    )
+                    @("upgrade", "--all", "--accept-package-agreements", "--accept-source-agreements", "--include-unknown", "--silent")
+                } else {
+                    @("upgrade", "--id", $program, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--include-unknown", "--silent")
                 }
             }
-
-            default {
-                @(
-                    "install"
-                    "--id"
-                    $program
-                    "--accept-package-agreements"
-                    "--accept-source-agreements"
-                    "--source"
-                    $source
-                    "--silent"
-                )
-            }
+            default     { @("install", "--id", $program, "--accept-package-agreements", "--accept-source-agreements", "--source", $source, "--silent") }
         }
 
-        $process = Start-Process `
-            -FilePath winget `
-            -ArgumentList $arguments `
-            -NoNewWindow `
-            -Wait `
-            -PassThru
-
+        $process = Start-Process -FilePath winget -ArgumentList $arguments -NoNewWindow -Wait -PassThru
         $exitCode = $process.ExitCode
 
         if ($exitCode -eq 0) {
             $outcome = "Succeeded"
             $detail = "exit code 0"
-        }
-        elseif ($rebootExitCodes.ContainsKey($exitCode)) {
+        } elseif ($rebootExitCodes.ContainsKey($exitCode)) {
             $outcome = "Succeeded"
             $detail = $rebootExitCodes[$exitCode]
-        }
-        elseif ($nothingToDo.ContainsKey($exitCode)) {
+        } elseif ($nothingToDo.ContainsKey($exitCode)) {
             $outcome = "Skipped"
             $detail = $nothingToDo[$exitCode]
-        }
-        elseif ($exitCode -eq $adminContextProhibited) {
+        } elseif ($exitCode -eq $adminContextProhibited) {
             $outcome = "Skipped"
-
             $detail = switch ($Action) {
-                "Install" {
-                    "already installed for the current user; elevated WinUtil cannot update it"
-                }
-
-                "Upgrade" {
-                    "not upgraded; installed for the current user and elevated WinUtil cannot modify it"
-                }
-
-                "Uninstall" {
-                    "remains installed for the current user; elevated WinUtil cannot uninstall it"
-                }
+                "Install" { "already installed for the current user; elevated WinUtil cannot update it" }
+                "Upgrade" { "not upgraded; installed for the current user and elevated WinUtil cannot modify it" }
+                "Uninstall" { "remains installed for the current user; elevated WinUtil cannot uninstall it" }
             }
-        }
-        else {
+        } else {
             $outcome = "Failed"
-
-            # The client module reports the same failure as a bare HRESULT,
-            # so the hex form and Microsoft's own list serve both paths.
             $detail = "WinGet reported 0x{0:X8}. See https://learn.microsoft.com/windows/package-manager/winget/returnCodes" -f $exitCode
         }
 
         $level = if ($outcome -eq "Failed") { "ERROR" } else { "INFO" }
-
-        Write-WinUtilLog `
-            -Level $level `
-            -Component "Package" `
-            -Message "$Action winget package $($outcome.ToLowerInvariant()): $program ($detail)"
+        Write-WinUtilLog -Level $level -Component "Package" -Message "$Action winget package $($outcome.ToLowerInvariant()): $program ($detail)"
 
         [pscustomobject]@{
             Package = $program
