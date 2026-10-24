@@ -174,6 +174,7 @@ Describe "Invoke-WPFUpdatesdefault" {
         }
         Mock Set-Service { }
         Mock Start-Service { }
+        Mock Set-ItemProperty { }
         Mock Get-ScheduledTask {
             [pscustomobject]@{
                 TaskPath = $TaskPath
@@ -241,6 +242,12 @@ Describe "Invoke-WPFUpdatesdefault" {
         Should -Invoke -CommandName Set-Service -Times 1 -Exactly -ParameterFilter {
             $Name -eq "UsoSvc" -and $StartupType -eq "Automatic"
         }
+        Should -Invoke -CommandName Set-ItemProperty -Times 1 -Exactly -ParameterFilter {
+            $Path -eq "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc" -and
+                $Name -eq "Start" -and
+                $Value -eq 3 -and
+                $Type -eq "DWord"
+        }
         Should -Not -Invoke Set-Service -ParameterFilter {
             $Name -eq "WaaSMedicSvc"
         }
@@ -301,6 +308,12 @@ Describe "Invoke-WPFUpdatessecurity" {
         }
         Should -Invoke -CommandName Start-Service -Times 1 -Exactly -ParameterFilter {
             $Name -eq "UsoSvc"
+        }
+        Should -Invoke -CommandName Set-ItemProperty -Times 1 -Exactly -ParameterFilter {
+            $Path -eq "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WaaSMedicSvc" -and
+                $Name -eq "Start" -and
+                $Value -eq 3 -and
+                $Type -eq "DWord"
         }
         foreach ($expectedTaskPath in $script:updateTaskPaths) {
             $expected = $expectedTaskPath
