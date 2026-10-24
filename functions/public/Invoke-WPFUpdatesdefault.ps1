@@ -1,10 +1,10 @@
+
 function Invoke-WPFUpdatesdefault {
     <#
-
     .SYNOPSIS
         Resets Windows Update settings to default
-
     #>
+
     Write-WinUtilLog -Component "Updates" -Message "Resetting Windows Update settings to default."
 
     Write-Host "Removing Windows Update settings managed by WinUtil..." -ForegroundColor Green
@@ -45,6 +45,7 @@ function Invoke-WPFUpdatesdefault {
 
     $explorerPolicyPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"
     $settingsPageVisibility = (Get-ItemProperty -Path $explorerPolicyPath -Name "SettingsPageVisibility" -ErrorAction SilentlyContinue).SettingsPageVisibility
+
     if ($settingsPageVisibility -eq "hide:windowsupdate") {
         Write-Host "Removing WinUtil's legacy Windows Update page restriction..."
         Write-WinUtilLog -Component "Updates" -Message "Removing the legacy Windows Update settings page restriction."
@@ -67,6 +68,14 @@ function Invoke-WPFUpdatesdefault {
     Set-Service -Name UsoSvc -StartupType Automatic
     Start-Service -Name UsoSvc
 
+    # Restore the Windows Update Medic Service startup configuration.
+    # This does not repair missing service files or modules.
+    Set-ItemProperty `
+        -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc" `
+        -Name "Start" `
+        -Value 3 `
+        -ErrorAction Continue
+
     Write-Host "Enabling update related scheduled tasks..." -ForegroundColor Green
     Write-WinUtilLog -Component "Updates" -Message "Enabling update related scheduled tasks."
 
@@ -79,9 +88,9 @@ function Invoke-WPFUpdatesdefault {
         '\Microsoft\WindowsUpdate\*'
 
     foreach ($Task in $Tasks) {
-        Get-ScheduledTask -TaskPath $Task -ErrorAction SilentlyContinue | Enable-ScheduledTask -ErrorAction SilentlyContinue
+        Get-ScheduledTask -TaskPath $Task -ErrorAction SilentlyContinue |
+            Enable-ScheduledTask -ErrorAction SilentlyContinue
     }
-
 
     Write-Host "Note: You must restart your system in order for all changes to take effect." -ForegroundColor Yellow
     Write-WinUtilLog -Component "Updates" -Message "Windows Update default workflow completed. Restart required."
